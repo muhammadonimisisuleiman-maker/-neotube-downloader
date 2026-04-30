@@ -2,63 +2,94 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
+import fs from "fs";
+import youtubedl from "youtube-dl-exec";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = process.env.PORT || 3000;
 
   app.use(express.json());
 
-  // SSE endpoint for downloading
-  app.get("/api/download", (req, res) => {
-    const url = req.query.url as string;
-    const mode = req.query.mode as string || 'video';
-    const quality = req.query.quality as string || '1080p';
-
-    if (!url) {
-      return res.status(400).json({ error: "URL is required" });
-    }
-
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-
-    // Send initial status
-    res.write(`data: ${JSON.stringify({ status: 'fetching_info', progress: 0, speed: '0 MB/s', eta: '--:--' })}\n\n`);
-
-    let progress = 0;
-    
-    // Simulate real download process
-    const interval = setInterval(() => {
-      progress += Math.random() * 5 + 2; // Add 2-7% per tick
-      
-      if (progress >= 100) {
-        progress = 100;
-        res.write(`data: ${JSON.stringify({ 
-          status: 'completed', 
-          progress: 100, 
-          speed: '0 MB/s', 
-          eta: '00:00' 
-        })}\n\n`);
-        clearInterval(interval);
-        res.end();
-      } else {
-        const speedNum = (Math.random() * 10 + 5).toFixed(1);
-        const etaNum = Math.ceil((100 - progress) / 5);
-        res.write(`data: ${JSON.stringify({ 
-          status: 'downloading', 
-          progress: Math.floor(progress), 
-          speed: `${speedNum} MB/s`, 
-          eta: `00:${etaNum.toString().padStart(2, '0')}` 
-        })}\n\n`);
+  // API endpoint to fetch video metadata
+  app.get("/api/info", async (req, res) => {
+    try {
+      const url = req.query.url as string;
+      if (!url) {
+        return res.status(400).json({ error: "Invalid YouTube URL" });
       }
-    }, 800);
+      // Check if cookies.txt exists to help bypass bot protection
+      const cookiePath = path.join(process.cwd(), 'cookies.txt');
+      const hasCookies = fs.existsSync(cookiePath);
 
-    req.on('close', () => {
-      clearInterval(interval);
-    });
+      const info = await youtubedl(url, {
+        dumpJson: true,
+        noWarnings: true,
+        noCheckCertificate: true,
+        ...(hasCookies ? { cookies: cookiePath } : {})
+      });
+      res.json({ title: info.title, lengthSeconds: info.duration });
+    } catch (error: any) {
+      console.error(error);
+      res.status(500).json({ error: error.message || "Failed to fetch info" });
+    }
+  });
+
+  // API endpoint for downloading the stream directly
+  app.get("/api/stream", async (req, res) => {
+    try {
+      const url = req.query.url as string;
+      const mode = req.query.mode as string || 'video';
+      
+      if (!url) {
+        return res.status(400).send("Invalid YouTube URL");
+      }
+
+      // Check if cookies.txt exists
+      const cookiePath = path.join(process.cwd(), 'cookies.txt');
+      const hasCookies = fs.existsSync(cookiePath);
+
+      // First get info to determine the title and length
+      const info = await youtubedl(url, { 
+        dumpJson: true, 
+        noWarnings: true,
+        ...(hasCookies ? { cookies: cookiePath } : {})
+      });
+      const title = info.title.replace(/[^\w\s]/gi, '_');
+
+      const format = mode === 'audio' ? 'bestaudio' : 'b'; // 'b' for best pre-merged format
+
+      res.setHeader('Content-Disposition', `attachment; filename="${title}.${mode === 'audio' ? 'mp3' : 'mp4'}"`);
+      if (mode === 'audio') {
+        res.setHeader('Content-Type', 'audio/mpeg');
+      } else {
+        res.setHeader('Content-Type', 'video/mp4');
+      }
+
+      const subprocess = youtubedl.exec(url, {
+        o: '-',
+        f: format,
+        noWarnings: true,
+        ...(hasCookies ? { cookies: cookiePath } : {})
+      });
+
+      if (subprocess.stdout) {
+        subprocess.stdout.pipe(res);
+      }
+      
+      subprocess.catch(err => {
+        console.error("Stream error:", err);
+        if (!res.headersSent) res.status(500).end();
+      });
+
+    } catch (error: any) {
+      console.error(error);
+      if (!res.headersSent) {
+        res.status(500).send(error.message);
+      }
+    }
   });
 
   // Health endpoint

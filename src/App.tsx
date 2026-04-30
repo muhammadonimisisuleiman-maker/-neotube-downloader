@@ -268,63 +268,118 @@ export default function App() {
     return parseFloat((bytesPerSec / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  const startDownloadTask = (task: QueueItem) => {
+  const startDownloadTask = async (task: QueueItem) => {
     setQueue(prev => prev.map(item => 
       item.id === task.id ? { ...item, status: 'extracting' } : item
     ));
 
-    setLogs(prev => [...prev, `[info] Starting download for: ${task.url}`]);
+    setLogs(prev => [...prev, `[info] Fetching info for: ${task.url}`]);
 
-    // Connect to local backend instead of mocking
-    const es = new EventSource(`/api/download?url=${encodeURIComponent(task.url)}&mode=${task.mode}&quality=${task.quality}`);
-    
-    es.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      
-      if (data.status === 'completed' || data.progress >= 100) {
-        es.close();
-        
-        // Add to history and cleanup
-        const newItem: HistoryItem = {
-          id: Date.now().toString(),
-          title: task.title,
-          date: new Date().toLocaleString(),
-          size: `${Math.floor(Math.random() * 200 + 50)} MB`,
-          mode: task.mode,
-          quality: task.quality,
-          url: task.url
-        };
-        setHistory(h => [newItem, ...h]);
-        setLogs(l => [...l, `[success] "${task.title}" downloaded successfully via backend!`]);
-        
-        setQueue(prevQueue => prevQueue.map(item => 
-          item.id === task.id ? { ...item, progress: 100, status: 'completed', speed: '0 KB/s', eta: '00:00' } : item
-        ));
-      } else {
-        setQueue(prevQueue => prevQueue.map(item => {
-          if (item.id === task.id) {
-            if (item.isPaused) return item;
-            return {
-              ...item,
-              progress: data.progress,
-              status: data.status,
-              eta: data.eta,
-              speed: data.speed
-            };
-          }
-          return item;
-        }));
+    try {
+      const infoRes = await fetch(`/api/info?url=${encodeURIComponent(task.url)}`);
+      if (!infoRes.ok) {
+        const errObj = await infoRes.json().catch(() => ({}));
+        throw new Error(errObj.error || `Could not fetch info: Status ${infoRes.status}`);
       }
-    };
+      const info = await infoRes.json();
+      
+      const realTitle = info.title || task.title;
 
-    es.onerror = (err) => {
-      console.error("SSE error", err);
-      es.close();
-      setLogs(l => [...l, `[error] Download connection failed for: ${task.url}`]);
-      setQueue(prev => prev.map(item => 
-        item.id === task.id && item.status !== 'completed' ? { ...item, status: 'canceled', speed: '0 KB/s', eta: '--:--' } : item
+      setQueue(prevQueue => prevQueue.map(item => 
+        item.id === task.id ? { ...item, title: realTitle, status: 'downloading' } : item
       ));
-    };
+
+      setLogs(prev => [...prev, `[info] Starting download: ${realTitle}`]);
+
+      // Download via fetch to track progress
+      const downloadUrl = `/api/stream?url=${encodeURIComponent(task.url)}&mode=${task.mode}&quality=${task.quality}`;
+      const response = await fetch(downloadUrl);
+      
+      if (!response.ok) throw new Error("Failed to start download stream");
+
+      const contentLength = response.headers.get('content-length');
+      const total = contentLength ? parseInt(contentLength, 10) : 0;
+      
+      let loaded = 0;
+      const reader = response.body?.getReader();
+      const chunks: Uint8Array[] = [];
+
+      if (!reader) throw new Error("ReadableStream not supported");
+      
+      let lastTime = Date.now();
+      let lastLoaded = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        
+        if (done) {
+          break;
+        }
+
+        if (value) {
+          chunks.push(value);
+          loaded += value.length;
+          
+          const now = Date.now();
+          if (now - lastTime > 500) { // update progress every 500ms
+            const speedBytes = (loaded - lastLoaded) / ((now - lastTime) / 1000);
+            const speedStr = formatSpeed(speedBytes);
+            const progress = total ? (loaded / total) * 100 : Math.min(100, loaded / (50 * 1024 * 1024) * 100);
+            
+            setQueue(prevQueue => prevQueue.map(item => {
+              if (item.id === task.id && !item.isPaused) {
+                return { 
+                  ...item, 
+                  progress: progress, 
+                  status: 'downloading',
+                  speed: speedStr,
+                  eta: total ? `00:${Math.max(0, Math.floor((total - loaded) / speedBytes)).toString().padStart(2, '0')}` : '--:--'
+                };
+              }
+              return item;
+            }));
+            
+            lastTime = now;
+            lastLoaded = loaded;
+          }
+        }
+      }
+
+      // Download completed
+      const blob = new Blob(chunks, { type: task.mode === 'audio' ? 'audio/mpeg' : 'video/mp4' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${realTitle.replace(/[^\w\s]/gi, '_')}.${task.mode === 'audio' ? 'mp3' : 'mp4'}`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+
+      const newItem: HistoryItem = {
+        id: Date.now().toString(),
+        title: realTitle,
+        date: new Date().toLocaleString(),
+        size: total ? `${(total / (1024 * 1024)).toFixed(1)} MB` : 'Unknown',
+        mode: task.mode,
+        quality: task.quality,
+        url: task.url
+      };
+      
+      setHistory(h => [newItem, ...h]);
+      setLogs(l => [...l, `[success] "${realTitle}" downloaded perfectly!`]);
+      
+      setQueue(prevQueue => prevQueue.map(item => 
+        item.id === task.id ? { ...item, progress: 100, status: 'completed', speed: '0 KB/s', eta: '00:00' } : item
+      ));
+
+    } catch (error: any) {
+      console.error(error);
+      setLogs(l => [...l, `[error] Download failed for ${task.url}: ${error.message || String(error)}`]);
+      setQueue(prevQueue => prevQueue.map(item => 
+        item.id === task.id && item.status !== 'completed' ? { ...item, status: 'canceled', speed: '0 KB/s', eta: '--:--', progress: 0 } : item
+      ));
+    }
   };
 
   const handleAddToQueue = () => {
