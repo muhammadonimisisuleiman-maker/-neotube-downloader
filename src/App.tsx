@@ -156,6 +156,10 @@ export default function App() {
     const saved = localStorage.getItem('neotube_darkMode');
     return saved !== null ? JSON.parse(saved) : true;
   });
+  const [autoExport, setAutoExport] = useState(() => {
+    const saved = localStorage.getItem('neotube_autoExport');
+    return saved !== null ? JSON.parse(saved) : true;
+  });
 
   // States
   const [queue, setQueue] = useState<QueueItem[]>([]);
@@ -171,6 +175,7 @@ export default function App() {
   useEffect(() => { localStorage.setItem('neotube_quality', quality); }, [quality]);
   useEffect(() => { localStorage.setItem('neotube_savePath', savePath); }, [savePath]);
   useEffect(() => { localStorage.setItem('neotube_darkMode', JSON.stringify(darkMode)); }, [darkMode]);
+  useEffect(() => { localStorage.setItem('neotube_autoExport', JSON.stringify(autoExport)); }, [autoExport]);
   useEffect(() => { localStorage.setItem('neotube_history', JSON.stringify(history)); }, [history]);
 
   const [logs, setLogs] = useState<string[]>([
@@ -180,15 +185,22 @@ export default function App() {
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [isHovering, setIsHovering] = useState(false);
   
+  const [netscapeCookies, setNetscapeCookies] = useState("");
+  const [isSavingCookies, setIsSavingCookies] = useState(false);
+  
   const [clipboardUrl, setClipboardUrl] = useState<string | null>(null);
   const [showClipboardPrompt, setShowClipboardPrompt] = useState(false);
   const lastCheckedUrl = useRef<string | null>(null);
 
   const handleAddFromClipboard = () => {
     if (clipboardUrl) {
-      setUrl(clipboardUrl);
+      if (autoExport) {
+        addUrlsToQueue(clipboardUrl);
+      } else {
+        setUrl(clipboardUrl);
+      }
       setShowClipboardPrompt(false);
-      setLogs(prev => [...prev, `[system] URL captured from clipboard. Ready to add.`]);
+      setLogs(prev => [...prev, `[system] URL captured from clipboard. ${autoExport ? 'Added to queue.' : 'Ready to add.'}`]);
     }
   };
 
@@ -205,10 +217,17 @@ export default function App() {
         if (urlPattern.test(trimmed) && trimmed !== lastCheckedUrl.current && trimmed !== url) {
           const isDuplicate = queue.some(item => item.url === trimmed) || history.some(item => item.url === trimmed);
           if (!isDuplicate) {
-            setClipboardUrl(trimmed);
-            setShowClipboardPrompt(true);
             lastCheckedUrl.current = trimmed;
-            setTimeout(() => setShowClipboardPrompt(false), 10000);
+            if (autoExport) {
+               addUrlsToQueue(trimmed);
+               setClipboardUrl(trimmed);
+               setShowClipboardPrompt(true);
+               setTimeout(() => setShowClipboardPrompt(false), 3000);
+            } else {
+               setClipboardUrl(trimmed);
+               setShowClipboardPrompt(true);
+               setTimeout(() => setShowClipboardPrompt(false), 10000);
+            }
           }
         }
       } catch (err) {
@@ -220,7 +239,16 @@ export default function App() {
     window.addEventListener('focus', handleFocus);
     checkClipboard();
     return () => window.removeEventListener('focus', handleFocus);
-  }, [queue, history, showClipboardPrompt, url]);
+  }, [queue, history, showClipboardPrompt, url, autoExport]);
+
+  useEffect(() => {
+    fetch('/api/cookies')
+      .then(res => res.json())
+      .then(data => {
+        if (data.cookies) setNetscapeCookies(data.cookies);
+      })
+      .catch(err => console.error("Failed to load cookies", err));
+  }, []);
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -382,10 +410,10 @@ export default function App() {
     }
   };
 
-  const handleAddToQueue = () => {
-    if (!url.trim()) return;
+  const addUrlsToQueue = (inputUrl: string) => {
+    if (!inputUrl.trim()) return;
     
-    const urls = url.split(/[,\n\s]+/).filter(u => u.trim() !== '');
+    const urls = inputUrl.split(/[,\n\s]+/).filter(u => u.trim() !== '');
     
     const newItems: QueueItem[] = urls.map((targetUrl, idx) => ({
       id: (Date.now() + idx).toString(),
@@ -401,8 +429,32 @@ export default function App() {
     }));
 
     setQueue(prev => [...prev, ...newItems]);
-    setUrl('');
     setLogs(prev => [...prev, `[system] Success! Added ${newItems.length} items to batch queue.`]);
+  };
+
+  const handleAddToQueue = () => {
+    addUrlsToQueue(url);
+    setUrl('');
+  };
+
+  const handleSaveCookies = async () => {
+    setIsSavingCookies(true);
+    try {
+      const res = await fetch('/api/cookies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cookies: netscapeCookies })
+      });
+      if (res.ok) {
+        setLogs(prev => [...prev, '[system] Cookies saved successfully!']);
+      } else {
+        setLogs(prev => [...prev, '[error] Failed to save cookies.']);
+      }
+    } catch (e) {
+      setLogs(prev => [...prev, '[error] Cookie save failed: ' + String(e)]);
+    } finally {
+      setIsSavingCookies(false);
+    }
   };
 
   const togglePause = (id: string) => {
@@ -455,33 +507,37 @@ export default function App() {
                 <ClipboardList size={24} />
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-[10px] font-black uppercase tracking-widest text-brand mb-1 text-left">Link Detected</p>
+                <p className="text-[10px] font-black uppercase tracking-widest text-brand mb-1 text-left">
+                  {autoExport ? "Auto-Export Started!" : "Link Detected"}
+                </p>
                 <div className="flex items-center gap-2">
                   <p className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate pr-4 text-left flex-1">
                     {clipboardUrl}
                   </p>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <button 
-                  onClick={() => setShowClipboardPrompt(false)}
-                  className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
-                >
-                  <X size={18} />
-                </button>
-                <button 
-                  onClick={handleAddFromClipboard}
-                  className="bg-brand text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-lg shadow-brand/20 hover:scale-105 active:scale-95 transition-all whitespace-nowrap"
-                >
-                  Capture
-                </button>
-              </div>
+              {!autoExport && (
+                <div className="flex items-center gap-2">
+                  <button 
+                    onClick={() => setShowClipboardPrompt(false)}
+                    className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
+                  >
+                    <X size={18} />
+                  </button>
+                  <button 
+                    onClick={handleAddFromClipboard}
+                    className="bg-brand text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-lg shadow-brand/20 hover:scale-105 active:scale-95 transition-all whitespace-nowrap"
+                  >
+                    Capture
+                  </button>
+                </div>
+              )}
               
               {/* Progress Line - indicating lifetime */}
               <motion.div 
                 initial={{ width: '100%' }}
                 animate={{ width: 0 }}
-                transition={{ duration: 10, ease: 'linear' }}
+                transition={{ duration: autoExport ? 3 : 10, ease: 'linear' }}
                 className="absolute bottom-0 left-0 h-1 bg-brand/30"
               />
             </GlowCard>
@@ -672,6 +728,28 @@ export default function App() {
                       </div>
                     </div>
 
+                    {/* Auto Export Toggle */}
+                    <div className="flex flex-col gap-4">
+                      <div className="flex items-center gap-2 text-slate-600 dark:text-slate-400 font-bold text-xs uppercase tracking-widest">
+                        <ClipboardList size={14} />
+                        Auto-Export Copied Links
+                      </div>
+                      <div className="flex p-1 bg-slate-100/50 dark:bg-slate-950/50 rounded-2xl border border-slate-200/50 dark:border-slate-800/50">
+                        <button 
+                          onClick={() => setAutoExport(true)}
+                          className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all ${autoExport ? (darkMode ? 'bg-zinc-900 text-white shadow-sm' : 'bg-white text-slate-800 shadow-sm') : 'text-slate-400 hover:text-slate-600'}`}
+                        >
+                          On
+                        </button>
+                        <button 
+                          onClick={() => setAutoExport(false)}
+                          className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all ${!autoExport ? (darkMode ? 'bg-zinc-900 text-white shadow-sm' : 'bg-white text-slate-800 shadow-sm') : 'text-slate-400 hover:text-slate-600'}`}
+                        >
+                          Off
+                        </button>
+                      </div>
+                    </div>
+
                     {/* Browser Integration */}
                     <div className="flex flex-col gap-4">
                       <div className="flex items-center gap-2 text-slate-600 dark:text-slate-400 font-bold text-xs uppercase tracking-widest">
@@ -690,15 +768,25 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Manual Cookie Load */}
+                    {/* Netscape HTTP Cookies */}
                     <div className="flex flex-col gap-4">
                       <div className="flex items-center gap-2 text-slate-600 dark:text-slate-400 font-bold text-xs uppercase tracking-widest">
-                        <Upload size={14} />
-                        Manual Loading
+                        <Cookie size={14} />
+                        Netscape Cookies
                       </div>
-                      <button className="w-full bg-slate-50 dark:bg-slate-900 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl p-3 text-[10px] font-bold text-slate-500 dark:text-slate-400 flex items-center justify-center gap-2 hover:border-brand/40 transition-colors">
+                      <textarea
+                        value={netscapeCookies}
+                        onChange={(e) => setNetscapeCookies(e.target.value)}
+                        placeholder="# Netscape HTTP Cookie File\n# Paste contents here..."
+                        className="bg-slate-50 dark:bg-zinc-900 border border-slate-200 dark:border-white/5 rounded-xl px-4 py-3 text-xs font-mono outline-none focus:border-brand/40 dark:text-slate-300 w-full shadow-inner min-h-[120px] resize-y"
+                      />
+                      <button 
+                        onClick={handleSaveCookies}
+                        disabled={isSavingCookies}
+                        className="w-full bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700/50 rounded-xl p-3 text-[10px] font-bold text-slate-600 dark:text-slate-300 flex items-center justify-center gap-2 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors disabled:opacity-50"
+                      >
                         <Upload size={14} />
-                        Load cookies.txt file...
+                        {isSavingCookies ? "Saving..." : "Save Cookies"}
                       </button>
                     </div>
 

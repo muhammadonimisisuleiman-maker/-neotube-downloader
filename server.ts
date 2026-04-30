@@ -9,7 +9,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT || 3000;
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
   app.use(express.json());
 
@@ -27,9 +27,10 @@ async function startServer() {
       const info = await youtubedl(url, {
         dumpJson: true,
         noWarnings: true,
-        noCheckCertificate: true,
+        noCheckCertificates: true,
+        jsRuntimes: 'node',
         ...(hasCookies ? { cookies: cookiePath } : {})
-      });
+      }) as any;
       res.json({ title: info.title, lengthSeconds: info.duration });
     } catch (error: any) {
       console.error(error);
@@ -55,8 +56,9 @@ async function startServer() {
       const info = await youtubedl(url, { 
         dumpJson: true, 
         noWarnings: true,
+        jsRuntimes: 'node',
         ...(hasCookies ? { cookies: cookiePath } : {})
-      });
+      }) as any;
       const title = info.title.replace(/[^\w\s]/gi, '_');
 
       const format = mode === 'audio' ? 'bestaudio' : 'b'; // 'b' for best pre-merged format
@@ -69,11 +71,12 @@ async function startServer() {
       }
 
       const subprocess = youtubedl.exec(url, {
-        o: '-',
-        f: format,
+        output: '-',
+        format: format,
         noWarnings: true,
+        jsRuntimes: 'node',
         ...(hasCookies ? { cookies: cookiePath } : {})
-      });
+      } as any);
 
       if (subprocess.stdout) {
         subprocess.stdout.pipe(res);
@@ -89,6 +92,37 @@ async function startServer() {
       if (!res.headersSent) {
         res.status(500).send(error.message);
       }
+    }
+  });
+
+  // Endpoint to get cookies
+  app.get("/api/cookies", (req, res) => {
+    try {
+      const cookiePath = path.join(process.cwd(), 'cookies.txt');
+      let cookies = "";
+      if (fs.existsSync(cookiePath)) {
+        cookies = fs.readFileSync(cookiePath, 'utf8');
+      }
+      res.json({ cookies });
+    } catch (error: any) {
+      console.error(error);
+      res.status(500).json({ error: error.message || "Failed to read cookies" });
+    }
+  });
+
+  // Endpoint to set cookies
+  app.post("/api/cookies", (req, res) => {
+    try {
+      const { cookies } = req.body;
+      if (typeof cookies !== 'string') {
+         return res.status(400).json({ error: "Invalid cookies string" });
+      }
+      const cookiePath = path.join(process.cwd(), 'cookies.txt');
+      fs.writeFileSync(cookiePath, cookies, 'utf8');
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error(error);
+      res.status(500).json({ error: error.message || "Failed to save cookies" });
     }
   });
 
