@@ -1,0 +1,77 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --color-brand: #0070FF;
+  --color-brand-light: #E0EEFF;
+}
+
+@layer base {
+  body {
+    @apply bg-[#F8FAFF] text-slate-900 font-sans antialiased transition-colors duration-300;
+    background-image: 
+      radial-gradient(at 0% 0%, hsla(210,100%,96%,1) 0, transparent 50%), 
+      radial-gradient(at 50% 0%, hsla(210,100%,98%,1) 0, transparent 50%), 
+      radial-gradient(at 100% 0%, hsla(210,100%,96%,1) 0, transparent 50%);
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  body::-webkit-scrollbar {
+    display: none;
+  }
+
+  .dark body {
+    @apply bg-black text-slate-100;
+    background-image: none;
+  }
+}
+
+.glow-card {
+  --glow-size: 20rem;
+  --glow-color: #0070FF;
+  position: relative;
+}
+
+.glow-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  user-select: none;
+  opacity: var(--glow-opacity, 0);
+  mask: radial-gradient(
+    var(--glow-size) var(--glow-size) at var(--glow-x) var(--glow-y),
+    white 1%,
+    transparent 50%
+  );
+  transition: opacity 400ms ease;
+  will-change: mask;
+  @apply rounded-[inherit] border-2 border-brand/30 z-20;
+}
+
+.glass {
+  @apply bg-white/60 backdrop-blur-xl border border-white/20 shadow-[0_8px_32px_0_rgba(31,38,135,0.07)] transition-all;
+}
+
+.dark .glass {
+  @apply bg-zinc-950/80 backdrop-blur-xl border border-white/5 shadow-2xl transition-all;
+}
+
+.glass-dark {
+  @apply bg-slate-900/5 backdrop-blur-md border border-slate-900/10;
+}
+
+.dark .glass-dark {
+  @apply bg-black/20 backdrop-blur-md border border-white/5;
+}
+
+.scroll-hide::-webkit-scrollbar {
+  display: none;
+}
+.scroll-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
