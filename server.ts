@@ -3,6 +3,7 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+import os from "os";
 import youtubedl from "youtube-dl-exec";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -14,51 +15,63 @@ async function startServer() {
   app.use(express.json());
 
   // API endpoint to fetch video metadata
-  app.get("/api/info", async (req, res) => {
+  app.post("/api/info", async (req, res) => {
+    let tempCookiePath: string | null = null;
     try {
-      const url = req.query.url as string;
+      const { url, cookies } = req.body;
       if (!url) {
         return res.status(400).json({ error: "Invalid YouTube URL" });
       }
-      // Check if cookies.txt exists to help bypass bot protection
-      const cookiePath = path.join(process.cwd(), 'cookies.txt');
-      const hasCookies = fs.existsSync(cookiePath);
-
-      const info = await youtubedl(url, {
+      
+      const options: any = {
         dumpJson: true,
         noWarnings: true,
         noCheckCertificates: true,
         jsRuntimes: 'node',
-        ...(hasCookies ? { cookies: cookiePath } : {})
-      }) as any;
+      };
+
+      if (cookies) {
+        tempCookiePath = path.join(os.tmpdir(), `yt-cookies-${Date.now()}-${Math.random().toString(36).substring(7)}.txt`);
+        fs.writeFileSync(tempCookiePath, cookies, 'utf8');
+        options.cookies = tempCookiePath;
+      }
+
+      const info = await youtubedl(url, options, { cwd: os.tmpdir() }) as any;
       res.json({ title: info.title, lengthSeconds: info.duration });
     } catch (error: any) {
       console.error(error);
       res.status(500).json({ error: error.message || "Failed to fetch info" });
+    } finally {
+      if (tempCookiePath && fs.existsSync(tempCookiePath)) {
+        fs.unlinkSync(tempCookiePath);
+      }
     }
   });
 
   // API endpoint for downloading the stream directly
-  app.get("/api/stream", async (req, res) => {
+  app.post("/api/stream", async (req, res) => {
+    let tempCookiePath: string | null = null;
     try {
-      const url = req.query.url as string;
-      const mode = req.query.mode as string || 'video';
+      const { url, mode = 'video', cookies } = req.body;
       
       if (!url) {
         return res.status(400).send("Invalid YouTube URL");
       }
 
-      // Check if cookies.txt exists
-      const cookiePath = path.join(process.cwd(), 'cookies.txt');
-      const hasCookies = fs.existsSync(cookiePath);
-
-      // First get info to determine the title and length
-      const info = await youtubedl(url, { 
+      const options: any = { 
         dumpJson: true, 
         noWarnings: true,
         jsRuntimes: 'node',
-        ...(hasCookies ? { cookies: cookiePath } : {})
-      }) as any;
+      };
+
+      if (cookies) {
+        tempCookiePath = path.join(os.tmpdir(), `yt-cookies-${Date.now()}-${Math.random().toString(36).substring(7)}.txt`);
+        fs.writeFileSync(tempCookiePath, cookies, 'utf8');
+        options.cookies = tempCookiePath;
+      }
+
+      // First get info to determine the title and length
+      const info = await youtubedl(url, options, { cwd: os.tmpdir() }) as any;
       const title = info.title.replace(/[^\w\s]/gi, '_');
 
       const format = mode === 'audio' ? 'bestaudio' : 'b'; // 'b' for best pre-merged format
@@ -70,13 +83,17 @@ async function startServer() {
         res.setHeader('Content-Type', 'video/mp4');
       }
 
-      const subprocess = youtubedl.exec(url, {
+      const execOptions: any = {
         output: '-',
         format: format,
         noWarnings: true,
         jsRuntimes: 'node',
-        ...(hasCookies ? { cookies: cookiePath } : {})
-      } as any);
+      };
+      if (tempCookiePath) {
+        execOptions.cookies = tempCookiePath;
+      }
+
+      const subprocess = youtubedl.exec(url, execOptions, { cwd: os.tmpdir() });
 
       if (subprocess.stdout) {
         subprocess.stdout.pipe(res);
@@ -87,42 +104,31 @@ async function startServer() {
         if (!res.headersSent) res.status(500).end();
       });
 
+      if (subprocess.stdout) {
+        subprocess.stdout.on('end', () => {
+          if (tempCookiePath && fs.existsSync(tempCookiePath)) {
+            fs.unlinkSync(tempCookiePath);
+          }
+        });
+        subprocess.stdout.on('error', () => {
+          if (tempCookiePath && fs.existsSync(tempCookiePath)) {
+            fs.unlinkSync(tempCookiePath);
+          }
+        });
+      } else {
+         if (tempCookiePath && fs.existsSync(tempCookiePath)) {
+            fs.unlinkSync(tempCookiePath);
+         }
+      }
+
     } catch (error: any) {
       console.error(error);
+      if (tempCookiePath && fs.existsSync(tempCookiePath)) {
+        fs.unlinkSync(tempCookiePath);
+      }
       if (!res.headersSent) {
         res.status(500).send(error.message);
       }
-    }
-  });
-
-  // Endpoint to get cookies
-  app.get("/api/cookies", (req, res) => {
-    try {
-      const cookiePath = path.join(process.cwd(), 'cookies.txt');
-      let cookies = "";
-      if (fs.existsSync(cookiePath)) {
-        cookies = fs.readFileSync(cookiePath, 'utf8');
-      }
-      res.json({ cookies });
-    } catch (error: any) {
-      console.error(error);
-      res.status(500).json({ error: error.message || "Failed to read cookies" });
-    }
-  });
-
-  // Endpoint to set cookies
-  app.post("/api/cookies", (req, res) => {
-    try {
-      const { cookies } = req.body;
-      if (typeof cookies !== 'string') {
-         return res.status(400).json({ error: "Invalid cookies string" });
-      }
-      const cookiePath = path.join(process.cwd(), 'cookies.txt');
-      fs.writeFileSync(cookiePath, cookies, 'utf8');
-      res.json({ success: true });
-    } catch (error: any) {
-      console.error(error);
-      res.status(500).json({ error: error.message || "Failed to save cookies" });
     }
   });
 

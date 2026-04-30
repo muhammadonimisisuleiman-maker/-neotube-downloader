@@ -185,7 +185,9 @@ export default function App() {
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [isHovering, setIsHovering] = useState(false);
   
-  const [netscapeCookies, setNetscapeCookies] = useState("");
+  const [netscapeCookies, setNetscapeCookies] = useState(() => {
+    return localStorage.getItem('neotube_cookies') || "";
+  });
   const [isSavingCookies, setIsSavingCookies] = useState(false);
   
   const [clipboardUrl, setClipboardUrl] = useState<string | null>(null);
@@ -242,15 +244,6 @@ export default function App() {
   }, [queue, history, showClipboardPrompt, url, autoExport]);
 
   useEffect(() => {
-    fetch('/api/cookies')
-      .then(res => res.json())
-      .then(data => {
-        if (data.cookies) setNetscapeCookies(data.cookies);
-      })
-      .catch(err => console.error("Failed to load cookies", err));
-  }, []);
-
-  useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       setMousePos({ x: e.clientX, y: e.clientY });
       setIsHovering(true);
@@ -304,7 +297,16 @@ export default function App() {
     setLogs(prev => [...prev, `[info] Fetching info for: ${task.url}`]);
 
     try {
-      const infoRes = await fetch(`/api/info?url=${encodeURIComponent(task.url)}`);
+      const infoRes = await fetch(`/api/info`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ 
+          url: task.url,
+          cookies: netscapeCookies 
+        })
+      });
       if (!infoRes.ok) {
         const errObj = await infoRes.json().catch(() => ({}));
         throw new Error(errObj.error || `Could not fetch info: Status ${infoRes.status}`);
@@ -320,8 +322,19 @@ export default function App() {
       setLogs(prev => [...prev, `[info] Starting download: ${realTitle}`]);
 
       // Download via fetch to track progress
-      const downloadUrl = `/api/stream?url=${encodeURIComponent(task.url)}&mode=${task.mode}&quality=${task.quality}`;
-      const response = await fetch(downloadUrl);
+      const downloadUrl = `/api/stream`;
+      const response = await fetch(downloadUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          url: task.url,
+          mode: task.mode,
+          quality: task.quality,
+          cookies: netscapeCookies
+        })
+      });
       
       if (!response.ok) throw new Error("Failed to start download stream");
 
@@ -440,16 +453,8 @@ export default function App() {
   const handleSaveCookies = async () => {
     setIsSavingCookies(true);
     try {
-      const res = await fetch('/api/cookies', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cookies: netscapeCookies })
-      });
-      if (res.ok) {
-        setLogs(prev => [...prev, '[system] Cookies saved successfully!']);
-      } else {
-        setLogs(prev => [...prev, '[error] Failed to save cookies.']);
-      }
+      localStorage.setItem('neotube_cookies', netscapeCookies);
+      setLogs(prev => [...prev, '[system] Cookies saved successfully to your browser!']);
     } catch (e) {
       setLogs(prev => [...prev, '[error] Cookie save failed: ' + String(e)]);
     } finally {
