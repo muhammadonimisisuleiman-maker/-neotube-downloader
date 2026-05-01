@@ -31,7 +31,8 @@ import {
   Pause,
   PlayCircle,
   Check,
-  ClipboardList
+  ClipboardList,
+  ListVideo
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -66,8 +67,10 @@ interface QueueItem {
   mode: DownloadMode;
   quality: Quality;
   title: string;
-  status: 'waiting' | 'extracting' | 'downloading' | 'merging' | 'completed' | 'error';
+  status: 'waiting' | 'extracting' | 'downloading' | 'merging' | 'completed' | 'error' | 'canceled';
   progress: number;
+  loadedSize?: number;
+  totalSize?: number;
   speed: string;
   eta: string;
   isPaused: boolean;
@@ -170,6 +173,14 @@ export default function App() {
     } catch(e) {}
     return [];
   });
+  
+  // Playlist states
+  const [showPlaylistDialog, setShowPlaylistDialog] = useState(false);
+  const [playlistEntries, setPlaylistEntries] = useState<any[]>([]);
+  const [selectedEntries, setSelectedEntries] = useState<Set<string>>(new Set());
+  const [isFetchingPlaylist, setIsFetchingPlaylist] = useState(false);
+  const [playlistTitle, setPlaylistTitle] = useState("");
+
 
   useEffect(() => { localStorage.setItem('neotube_mode', mode); }, [mode]);
   useEffect(() => { localStorage.setItem('neotube_quality', quality); }, [quality]);
@@ -267,6 +278,7 @@ export default function App() {
   }, [darkMode]);
 
   const logEndRef = useRef<HTMLDivElement>(null);
+  const abortControllers = useRef<{ [id: string]: AbortController }>({});
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -296,6 +308,9 @@ export default function App() {
 
     setLogs(prev => [...prev, `[info] Fetching info for: ${task.url}`]);
 
+    const controller = new AbortController();
+    abortControllers.current[task.id] = controller;
+
     try {
       const infoRes = await fetch(`/api/info`, {
         method: 'POST',
@@ -305,7 +320,8 @@ export default function App() {
         body: JSON.stringify({ 
           url: task.url,
           cookies: netscapeCookies 
-        })
+        }),
+        signal: controller.signal
       });
       if (!infoRes.ok) {
         const errObj = await infoRes.json().catch(() => ({}));
@@ -333,10 +349,14 @@ export default function App() {
           mode: task.mode,
           quality: task.quality,
           cookies: netscapeCookies
-        })
+        }),
+        signal: controller.signal
       });
       
-      if (!response.ok) throw new Error("Failed to start download stream");
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(errText || "Failed to start download stream");
+      }
 
       const contentLength = response.headers.get('content-length');
       const total = contentLength ? parseInt(contentLength, 10) : 0;
@@ -365,13 +385,16 @@ export default function App() {
           if (now - lastTime > 500) { // update progress every 500ms
             const speedBytes = (loaded - lastLoaded) / ((now - lastTime) / 1000);
             const speedStr = formatSpeed(speedBytes);
-            const progress = total ? (loaded / total) * 100 : Math.min(100, loaded / (50 * 1024 * 1024) * 100);
+            // Indeterminate progress (no total), cap visual progress at 95% until done, or if total is known, show real progress
+            const progress = total ? (loaded / total) * 100 : Math.min(95, (loaded / (50 * 1024 * 1024)) * 100);
             
             setQueue(prevQueue => prevQueue.map(item => {
               if (item.id === task.id && !item.isPaused) {
                 return { 
                   ...item, 
-                  progress: progress, 
+                  progress: progress,
+                  loadedSize: loaded,
+                  totalSize: total,
                   status: 'downloading',
                   speed: speedStr,
                   eta: total ? `00:${Math.max(0, Math.floor((total - loaded) / speedBytes)).toString().padStart(2, '0')}` : '--:--'
@@ -387,6 +410,10 @@ export default function App() {
       }
 
       // Download completed
+      if (loaded === 0) {
+        throw new Error("Stream closed without sending any data. You might be blocked by a bot check, check the Settings and add your YouTube Cookies.");
+      }
+
       const blob = new Blob(chunks, { type: task.mode === 'audio' ? 'audio/mpeg' : 'video/mp4' });
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -401,7 +428,7 @@ export default function App() {
         id: Date.now().toString(),
         title: realTitle,
         date: new Date().toLocaleString(),
-        size: total ? `${(total / (1024 * 1024)).toFixed(1)} MB` : 'Unknown',
+        size: total ? `${(total / (1024 * 1024)).toFixed(1)} MB` : `${(loaded / (1024 * 1024)).toFixed(1)} MB`,
         mode: task.mode,
         quality: task.quality,
         url: task.url
@@ -415,11 +442,17 @@ export default function App() {
       ));
 
     } catch (error: any) {
-      console.error(error);
-      setLogs(l => [...l, `[error] Download failed for ${task.url}: ${error.message || String(error)}`]);
+      if (error.name === 'AbortError') {
+        setLogs(l => [...l, `[info] Download cancelled for ${task.url}`]);
+      } else {
+        console.error(error);
+        setLogs(l => [...l, `[error] Download failed for ${task.url}: ${error.message || String(error)}`]);
+      }
       setQueue(prevQueue => prevQueue.map(item => 
         item.id === task.id && item.status !== 'completed' ? { ...item, status: 'canceled', speed: '0 KB/s', eta: '--:--', progress: 0 } : item
       ));
+    } finally {
+      delete abortControllers.current[task.id];
     }
   };
 
@@ -436,6 +469,8 @@ export default function App() {
       title: targetUrl.split('/').pop()?.substring(0, 30) || `Resource ${idx + 1}`,
       status: 'waiting',
       progress: 0,
+      loadedSize: 0,
+      totalSize: 0,
       speed: '0 KB/s',
       eta: '--:--',
       isPaused: false
@@ -446,7 +481,49 @@ export default function App() {
   };
 
   const handleAddToQueue = () => {
+    if (url.includes('list=')) {
+      handleFetchPlaylist();
+      return;
+    }
     addUrlsToQueue(url);
+    setUrl('');
+  };
+
+  const handleFetchPlaylist = async () => {
+    if (!url.trim()) return;
+    setIsFetchingPlaylist(true);
+    setShowPlaylistDialog(true);
+    setPlaylistEntries([]);
+    setSelectedEntries(new Set());
+    setPlaylistTitle("Loading Playlist...");
+    
+    try {
+      const res = await fetch('/api/playlist-info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, cookies: netscapeCookies })
+      });
+      if (!res.ok) throw new Error("Failed to fetch playlist");
+      const data = await res.json();
+      setPlaylistTitle(data.title || "Unknown Playlist");
+      setPlaylistEntries(data.entries || []);
+      // Pre-select all by default
+      setSelectedEntries(new Set((data.entries || []).map((e: any) => e.url)));
+    } catch (e) {
+      setPlaylistTitle("Failed to load playlist.");
+      console.error(e);
+    } finally {
+      setIsFetchingPlaylist(false);
+    }
+  };
+
+  const handleAddSelectedPlaylistItems = () => {
+    const urls = playlistEntries
+      .filter(e => selectedEntries.has(e.url))
+      .map(e => e.url)
+      .join('\\n');
+    addUrlsToQueue(urls);
+    setShowPlaylistDialog(false);
     setUrl('');
   };
 
@@ -470,6 +547,9 @@ export default function App() {
   };
 
   const removeFromQueue = (id: string) => {
+    if (abortControllers.current[id]) {
+      abortControllers.current[id].abort();
+    }
     setQueue(prev => prev.filter(item => item.id !== id));
   };
 
@@ -920,9 +1000,7 @@ export default function App() {
                              <Magnetic strength={0.2}>
                                <button 
                                  onClick={() => {
-                                   if (item.status === 'completed' || confirm('Remove this task?')) {
-                                     removeFromQueue(item.id);
-                                   }
+                                   removeFromQueue(item.id);
                                  }}
                                  className="p-2.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/5 text-slate-600 dark:text-slate-300 hover:text-rose-500 transition-colors"
                                >
@@ -948,7 +1026,7 @@ export default function App() {
                                />
                             </div>
                             <div className="flex justify-between items-center text-[10px] font-black text-slate-500 dark:text-slate-400 uppercase tracking-widest px-1">
-                               <span>{Math.floor(item.progress)}% COMPLETE</span>
+                               <span>{item.totalSize ? `${Math.floor(item.progress)}% COMPLETE` : `${((item.loadedSize || 0) / (1024 * 1024)).toFixed(1)} MB DOWNLOADED`}</span>
                                <span>{item.status.toUpperCase()}</span>
                             </div>
                          </div>
@@ -1057,6 +1135,113 @@ export default function App() {
           <p className="text-[10px] font-bold text-slate-400 dark:text-slate-700 uppercase tracking-tighter italic">Liquid Glass UI Kit</p>
         </footer>
 
+        {/* Playlist Items Checkbox Modal */}
+        <AnimatePresence>
+          {showPlaylistDialog && (
+            <>
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setShowPlaylistDialog(false)}
+                className="fixed inset-0 bg-slate-900/40 dark:bg-black/60 backdrop-blur-sm z-[100]"
+              />
+              <motion.div 
+                initial={{ x: '100%', opacity: 0.5 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={{ x: '100%', opacity: 0.5 }}
+                transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+                className="fixed top-0 right-0 h-[100dvh] w-full max-w-md bg-white dark:bg-zinc-950 shadow-2xl border-l border-slate-200 dark:border-white/10 z-[110] flex flex-col"
+              >
+                <div className="flex items-center justify-between p-6 border-b border-slate-100 dark:border-white/5 bg-slate-50/50 dark:bg-white/[0.02]">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-brand/10 text-brand flex items-center justify-center">
+                      <ListVideo size={20} />
+                    </div>
+                    <div>
+                      <h2 className="text-sm font-black text-slate-800 dark:text-white uppercase tracking-widest leading-none">Playlist Selection</h2>
+                      <p className="text-xs font-medium text-slate-500 mt-1 truncate max-w-[200px]">{playlistTitle}</p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => setShowPlaylistDialog(false)}
+                    className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/10 rounded-xl transition-all"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-2 relative">
+                  {isFetchingPlaylist ? (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
+                      <div className="w-8 h-8 rounded-full border-2 border-brand/20 border-t-brand animate-spin mb-4" />
+                      <p className="text-xs font-bold uppercase tracking-widest">Parsing target playlist...</p>
+                    </div>
+                  ) : playlistEntries.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center p-8 text-center opacity-50 my-auto">
+                      <ListVideo size={48} className="mb-4 text-slate-300 dark:text-slate-700" />
+                      <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">No entries found</p>
+                    </div>
+                  ) : (
+                    playlistEntries.map((entry, index) => (
+                      <div key={entry.id || index} className="flex items-center gap-3 p-3 rounded-xl hover:bg-slate-50 dark:hover:bg-white/5 border border-transparent dark:hover:border-white/5 transition-colors cursor-pointer" onClick={() => {
+                        const next = new Set(selectedEntries);
+                        if (next.has(entry.url)) next.delete(entry.url);
+                        else next.add(entry.url);
+                        setSelectedEntries(next);
+                      }}>
+                        <div className={`w-5 h-5 rounded flex items-center justify-center shrink-0 border transition-colors ${
+                          selectedEntries.has(entry.url) 
+                          ? 'bg-brand border-brand text-white' 
+                          : 'bg-transparent border-slate-300 dark:border-slate-700'
+                        }`}>
+                          {selectedEntries.has(entry.url) && <Check size={12} strokeWidth={4} />}
+                        </div>
+                        <div className="flex-1 min-w-0 flex flex-col justify-center">
+                          <p className="text-xs font-bold text-slate-700 dark:text-slate-300 truncate">
+                            {index + 1}. {entry.title}
+                          </p>
+                          <p className="text-[10px] font-medium text-slate-400 truncate">
+                            {entry.duration ? `${entry.duration}s • ` : ''}{entry.url?.split('/').pop()}
+                          </p>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="p-6 border-t border-slate-100 dark:border-white/5 bg-slate-50/50 dark:bg-white/[0.02]">
+                  <div className="flex items-center justify-between mb-4">
+                    <button 
+                      onClick={() => {
+                        if (selectedEntries.size === playlistEntries.length) {
+                          setSelectedEntries(new Set());
+                        } else {
+                          setSelectedEntries(new Set(playlistEntries.map(e => e.url)));
+                        }
+                      }}
+                      className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-800 transition-colors"
+                    >
+                      {selectedEntries.size === playlistEntries.length ? 'Deselect All' : 'Select All'}
+                    </button>
+                    <span className="text-[10px] font-black uppercase tracking-widest text-brand">
+                      {selectedEntries.size} / {playlistEntries.length} Items Selected
+                    </span>
+                  </div>
+                  <button 
+                    onClick={handleAddSelectedPlaylistItems}
+                    disabled={isFetchingPlaylist || selectedEntries.size === 0}
+                    className="w-full bg-brand text-white py-4 rounded-2xl font-black uppercase tracking-widest text-sm shadow-xl shadow-brand/20 hover:scale-[1.02] active:scale-95 transition-all disabled:opacity-50 disabled:pointer-events-none disabled:scale-100 flex items-center justify-center gap-2"
+                  >
+                    <Download size={18} />
+                    Add Selection to Queue
+                  </button>
+                </div>
+              </motion.div>
+            </>
+          )}
+        </AnimatePresence>
+
         {/* History Slide-over */}
         <AnimatePresence>
           {showHistory && (
@@ -1151,9 +1336,7 @@ export default function App() {
                 <div className="p-6 border-t border-slate-100 dark:border-slate-900 bg-slate-50/30 dark:bg-slate-900/30">
                   <button 
                     onClick={() => {
-                      if(confirm('Clear entire download history?')) {
-                        setHistory([]);
-                      }
+                      setHistory([]);
                     }}
                     disabled={history.length === 0}
                     className="w-full py-3 rounded-2xl border border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 text-xs font-bold uppercase tracking-widest hover:bg-slate-50 dark:hover:bg-slate-900 hover:text-rose-400 hover:border-rose-200 disabled:opacity-50 transition-all font-mono"

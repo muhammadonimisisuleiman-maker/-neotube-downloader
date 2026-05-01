@@ -40,7 +40,11 @@ async function startServer() {
       res.json({ title: info.title, lengthSeconds: info.duration });
     } catch (error: any) {
       console.error(error);
-      res.status(500).json({ error: error.message || "Failed to fetch info" });
+      let errorMsg = error.message || "Failed to fetch info";
+      if (errorMsg.includes("Sign in to confirm you’re not a bot")) {
+        errorMsg = "YouTube blocked this request (bot check). ⚠️ Please add your YouTube Netscape Cookies in Settings.";
+      }
+      res.status(500).json({ error: errorMsg });
     } finally {
       if (tempCookiePath && fs.existsSync(tempCookiePath)) {
         fs.unlinkSync(tempCookiePath);
@@ -127,7 +131,62 @@ async function startServer() {
         fs.unlinkSync(tempCookiePath);
       }
       if (!res.headersSent) {
-        res.status(500).send(error.message);
+        let errorMsg = error.message || "Failed to stream";
+        if (errorMsg.includes("Sign in to confirm you’re not a bot")) {
+          errorMsg = "YouTube blocked this request (bot check). ⚠️ Please add your YouTube Netscape Cookies in Settings.";
+        }
+        res.status(500).send(errorMsg);
+      }
+    }
+  });
+
+  // API endpoint to fetch playlist entries
+  app.post("/api/playlist-info", async (req, res) => {
+    let tempCookiePath: string | null = null;
+    try {
+      const { url, cookies } = req.body;
+      if (!url) {
+        return res.status(400).json({ error: "Invalid YouTube URL" });
+      }
+      
+      const options: any = {
+        dumpSingleJson: true,
+        flatPlaylist: true,
+        noWarnings: true,
+        noCheckCertificates: true,
+        jsRuntimes: 'node',
+      };
+
+      if (cookies) {
+        tempCookiePath = path.join(os.tmpdir(), `yt-cookies-${Date.now()}-${Math.random().toString(36).substring(7)}.txt`);
+        fs.writeFileSync(tempCookiePath, cookies, 'utf8');
+        options.cookies = tempCookiePath;
+      }
+
+      const info = await youtubedl(url, options, { cwd: os.tmpdir() }) as any;
+      
+      if (!info.entries) {
+         return res.json({ entries: [] });
+      }
+
+      const entries = info.entries.map((e: any) => ({
+        id: e.id,
+        title: e.title,
+        url: e.url || (e.id ? `https://www.youtube.com/watch?v=${e.id}` : null),
+        duration: e.duration
+      })).filter((e: any) => e.url);
+
+      res.json({ title: info.title, entries });
+    } catch (error: any) {
+      console.error(error);
+      let errorMsg = error.message || "Failed to fetch playlist info";
+      if (errorMsg.includes("Sign in to confirm you’re not a bot")) {
+        errorMsg = "YouTube blocked this request (bot check). ⚠️ Please add your YouTube Netscape Cookies in Settings.";
+      }
+      res.status(500).json({ error: errorMsg });
+    } finally {
+      if (tempCookiePath && fs.existsSync(tempCookiePath)) {
+        fs.unlinkSync(tempCookiePath);
       }
     }
   });

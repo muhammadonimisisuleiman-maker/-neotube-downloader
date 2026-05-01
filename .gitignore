@@ -6,3 +6,12 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Temporary and downloaded files
+*.mp4
+*.webm
+*.mkv
+*.part
+*.ytdl
+*-player-script.js
+cookies.txt
