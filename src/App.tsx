@@ -184,8 +184,8 @@ export default function App() {
     const saved = localStorage.getItem('neotube_darkMode');
     return saved !== null ? JSON.parse(saved) : true;
   });
-  const [autoExport, setAutoExport] = useState(() => {
-    const saved = localStorage.getItem('neotube_autoExport');
+  const [autoPaste, setAutoPaste] = useState(() => {
+    const saved = localStorage.getItem('neotube_autoPaste');
     return saved !== null ? JSON.parse(saved) : true;
   });
   const [youtubeCookies, setYoutubeCookies] = useState(() => {
@@ -229,7 +229,7 @@ export default function App() {
   useEffect(() => { localStorage.setItem('neotube_quality', quality); }, [quality]);
   useEffect(() => { localStorage.setItem('neotube_savePath', savePath); }, [savePath]);
   useEffect(() => { localStorage.setItem('neotube_darkMode', JSON.stringify(darkMode)); }, [darkMode]);
-  useEffect(() => { localStorage.setItem('neotube_autoExport', JSON.stringify(autoExport)); }, [autoExport]);
+  useEffect(() => { localStorage.setItem('neotube_autoPaste', JSON.stringify(autoPaste)); }, [autoPaste]);
   useEffect(() => { localStorage.setItem('neotube_history', JSON.stringify(history)); }, [history]);
   useEffect(() => { localStorage.setItem('neotube_queue', JSON.stringify(queue)); }, [queue]);
   useEffect(() => { localStorage.setItem('neotube_cookies', youtubeCookies); }, [youtubeCookies]);
@@ -256,13 +256,9 @@ export default function App() {
 
   const handleAddFromClipboard = () => {
     if (clipboardUrl) {
-      if (autoExport) {
-        addUrlsToQueue(clipboardUrl);
-      } else {
-        setUrl(clipboardUrl);
-      }
+      setUrl(clipboardUrl);
       setShowClipboardPrompt(false);
-      setLogs(prev => [...prev, `[system] URL captured from clipboard. ${autoExport ? 'Added to queue.' : 'Ready to add.'}`]);
+      setLogs(prev => [...prev, `[system] URL captured from clipboard. Ready to add.`]);
     }
   };
 
@@ -284,8 +280,8 @@ export default function App() {
             const isDuplicate = queue.some(item => item.url === foundUrl) || history.some(item => item.url === foundUrl);
             if (!isDuplicate) {
               lastCheckedUrl.current = foundUrl;
-              if (autoExport) {
-                 addUrlsToQueue(foundUrl);
+              if (autoPaste) {
+                 setUrl(foundUrl);
                  setClipboardUrl(foundUrl);
                  setShowClipboardPrompt(true);
                  setTimeout(() => setShowClipboardPrompt(false), 3000);
@@ -310,7 +306,7 @@ export default function App() {
     window.addEventListener('focus', handleFocus);
     checkClipboard();
     return () => window.removeEventListener('focus', handleFocus);
-  }, [queue, history, showClipboardPrompt, url, autoExport]);
+  }, [queue, history, showClipboardPrompt, url, autoPaste]);
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -638,6 +634,28 @@ export default function App() {
     transition: { type: 'spring', damping: 15, stiffness: 100, mass: 1 }
   };
 
+  const handleSubmitFeedback = () => {
+    const subject = encodeURIComponent(`NeoTube ${feedbackType} from ${feedbackRole}`);
+    const bodyText = `From: ${feedbackRole}\nType: ${feedbackType}\n\n${feedbackText}`;
+    const body = encodeURIComponent(bodyText);
+    
+    try {
+      window.location.href = `mailto:muhammadonimisisuleiman@gmail.com?subject=${subject}&body=${body}`;
+      setLogs(prev => [...prev, `[system] Attempting to open mail client for feedback...`]);
+      setShowFeedbackModal(false);
+    } catch (err) {
+      console.error('Mailto failed', err);
+      navigator.clipboard.writeText(bodyText)
+        .then(() => {
+          setLogs(prev => [...prev, '[error] Could not open mail client. Feedback copied to clipboard. Paste it in your mail app.']);
+          setShowFeedbackModal(false);
+        })
+        .catch(() => {
+          setLogs(prev => [...prev, '[error] Could not open mail client and could not copy to clipboard.']);
+        });
+    }
+  };
+
   return (
     <div className="min-h-screen p-4 md:p-8 flex flex-col items-center justify-start overflow-x-hidden">
       {/* Liquid Light (Mouse Follower) - Ultra Fluid Background */}
@@ -671,7 +689,7 @@ export default function App() {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-[10px] font-black uppercase tracking-widest text-brand mb-1 text-left">
-                  {autoExport ? "Auto-Export Started!" : "Link Detected"}
+                  {autoPaste ? "Auto-Pasted!" : "Link Detected"}
                 </p>
                 <div className="flex items-center gap-2">
                   <p className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate pr-4 text-left flex-1">
@@ -679,7 +697,7 @@ export default function App() {
                   </p>
                 </div>
               </div>
-              {!autoExport && (
+              {!autoPaste && (
                 <div className="flex items-center gap-2">
                   <button 
                     onClick={() => setShowClipboardPrompt(false)}
@@ -700,7 +718,7 @@ export default function App() {
               <motion.div 
                 initial={{ width: '100%' }}
                 animate={{ width: 0 }}
-                transition={{ duration: autoExport ? 3 : 10, ease: 'linear' }}
+                transition={{ duration: autoPaste ? 3 : 10, ease: 'linear' }}
                 className="absolute bottom-0 left-0 h-1 bg-brand/30"
               />
             </GlowCard>
@@ -957,18 +975,18 @@ export default function App() {
                     <div className="flex flex-col gap-4">
                       <div className="flex items-center gap-2 text-slate-600 dark:text-slate-400 font-bold text-xs uppercase tracking-widest">
                         <ClipboardList size={14} />
-                        Auto-Export Copied Links
+                        Auto-Paste Copied Links
                       </div>
                       <div className="flex p-1 bg-slate-100/50 dark:bg-slate-950/50 rounded-2xl border border-slate-200/50 dark:border-slate-800/50">
                         <button 
-                          onClick={() => setAutoExport(true)}
-                          className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all ${autoExport ? (darkMode ? 'bg-zinc-900 text-white shadow-sm' : 'bg-white text-slate-800 shadow-sm') : 'text-slate-400 hover:text-slate-600'}`}
+                          onClick={() => setAutoPaste(true)}
+                          className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all ${autoPaste ? (darkMode ? 'bg-zinc-900 text-white shadow-sm' : 'bg-white text-slate-800 shadow-sm') : 'text-slate-400 hover:text-slate-600'}`}
                         >
                           On
                         </button>
                         <button 
-                          onClick={() => setAutoExport(false)}
-                          className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all ${!autoExport ? (darkMode ? 'bg-zinc-900 text-white shadow-sm' : 'bg-white text-slate-800 shadow-sm') : 'text-slate-400 hover:text-slate-600'}`}
+                          onClick={() => setAutoPaste(false)}
+                          className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all ${!autoPaste ? (darkMode ? 'bg-zinc-900 text-white shadow-sm' : 'bg-white text-slate-800 shadow-sm') : 'text-slate-400 hover:text-slate-600'}`}
                         >
                           Off
                         </button>
@@ -1579,12 +1597,7 @@ export default function App() {
                       Cancel
                     </button>
                     <button 
-                      onClick={() => {
-                        const subject = encodeURIComponent(`NeoTube ${feedbackType} from ${feedbackRole}`);
-                        const body = encodeURIComponent(feedbackText);
-                        window.open(`mailto:muhammadonimisisuleiman@gmail.com?subject=${subject}&body=${body}`, '_blank');
-                        setShowFeedbackModal(false);
-                      }}
+                      onClick={handleSubmitFeedback}
                       disabled={!feedbackText.trim()}
                       className="px-5 py-2.5 rounded-lg text-sm font-bold text-white bg-brand shadow-sm shadow-brand/20 hover:scale-[1.02] active:scale-95 disabled:opacity-50 disabled:scale-100 transition-all"
                     >
