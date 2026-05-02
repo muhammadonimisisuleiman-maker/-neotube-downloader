@@ -16,12 +16,41 @@
       radial-gradient(at 0% 0%, hsla(210,100%,96%,1) 0, transparent 50%), 
       radial-gradient(at 50% 0%, hsla(210,100%,98%,1) 0, transparent 50%), 
       radial-gradient(at 100% 0%, hsla(210,100%,96%,1) 0, transparent 50%);
-    -ms-overflow-style: none;
-    scrollbar-width: none;
+  }
+ 
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(100, 116, 139, 0.4) transparent;
   }
 
-  body::-webkit-scrollbar {
-    display: none;
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: rgba(100, 116, 139, 0.4);
+    border-radius: 20px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(100, 116, 139, 0.6);
+  }
+
+  .dark * {
+    scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+  }
+
+  .dark *::-webkit-scrollbar-thumb {
+    background-color: rgba(255, 255, 255, 0.15);
+  }
+
+  .dark *::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(255, 255, 255, 0.25);
   }
 
   .dark body {

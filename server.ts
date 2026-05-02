@@ -56,7 +56,7 @@ async function startServer() {
   app.post("/api/stream", async (req, res) => {
     let tempCookiePath: string | null = null;
     try {
-      const { url, mode = 'video', cookies } = req.body;
+      const { url, mode = 'video', quality = '1080p', cookies } = req.body;
       
       if (!url) {
         return res.status(400).send("Invalid YouTube URL");
@@ -78,7 +78,17 @@ async function startServer() {
       const info = await youtubedl(url, options, { cwd: os.tmpdir() }) as any;
       const title = info.title.replace(/[^\w\s]/gi, '_');
 
-      const format = mode === 'audio' ? 'bestaudio' : 'b'; // 'b' for best pre-merged format
+      let format = 'b';
+      if (mode === 'audio') {
+        format = 'bestaudio';
+      } else {
+         if (quality === '4k') format = 'b[height<=2160]/b';
+         else if (quality === '2k') format = 'b[height<=1440]/b';
+         else if (quality === '1080p') format = 'b[height<=1080]/b';
+         else if (quality === '720p') format = 'b[height<=720]/b';
+         else if (quality === '480p') format = 'b[height<=480]/b';
+         else if (quality === '360p') format = 'b[height<=360]/b';
+      }
 
       res.setHeader('Content-Disposition', `attachment; filename="${title}.${mode === 'audio' ? 'mp3' : 'mp4'}"`);
       if (mode === 'audio') {

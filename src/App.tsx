@@ -32,13 +32,26 @@ import {
   PlayCircle,
   Check,
   ClipboardList,
-  ListVideo
+  Clipboard,
+  ListVideo,
+  Bug,
+  User,
+  Tag
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
 // --- Types ---
 type DownloadMode = 'video' | 'audio';
-type Quality = 'best' | '1080p' | '720p' | '480p' | '360p';
+type Quality = '4k' | '2k' | '1080p' | '720p' | '480p' | '360p';
+type AudioQuality = 'best' | '320kbps' | '256kbps' | '128kbps' | '64kbps';
+
+const getThumbnailForUrl = (url: string) => {
+  const ytMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+  if (ytMatch && ytMatch[1]) {
+    return `https://img.youtube.com/vi/${ytMatch[1]}/hqdefault.jpg`;
+  }
+  return undefined;
+};
 
 interface DownloadStatus {
   id: string;
@@ -59,6 +72,7 @@ interface HistoryItem {
   mode: DownloadMode;
   quality: Quality;
   url: string;
+  thumbnail?: string;
 }
 
 interface QueueItem {
@@ -74,6 +88,7 @@ interface QueueItem {
   speed: string;
   eta: string;
   isPaused: boolean;
+  thumbnail?: string;
 }
 
 // --- Magnetic Component ---
@@ -150,11 +165,21 @@ export default function App() {
   const [quality, setQuality] = useState<Quality>(() => {
     return (localStorage.getItem('neotube_quality') as Quality) || '1080p';
   });
+  const [audioQuality, setAudioQuality] = useState<AudioQuality>(() => {
+    return (localStorage.getItem('neotube_audioQuality') as AudioQuality) || 'best';
+  });
+  useEffect(() => {
+    localStorage.setItem('neotube_audioQuality', audioQuality);
+  }, [audioQuality]);
   const [savePath, setSavePath] = useState(() => {
     return localStorage.getItem('neotube_savePath') || 'C:\\Users\\NeoTube\\Downloads';
   });
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+  const [feedbackRole, setFeedbackRole] = useState('YouTuber');
+  const [feedbackType, setFeedbackType] = useState('Feature Request');
+  const [feedbackText, setFeedbackText] = useState('');
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem('neotube_darkMode');
     return saved !== null ? JSON.parse(saved) : true;
@@ -163,9 +188,27 @@ export default function App() {
     const saved = localStorage.getItem('neotube_autoExport');
     return saved !== null ? JSON.parse(saved) : true;
   });
+  const [youtubeCookies, setYoutubeCookies] = useState(() => {
+    return localStorage.getItem('neotube_cookies') || '';
+  });
 
   // States
-  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [queue, setQueue] = useState<QueueItem[]>(() => {
+    try {
+      const saved = localStorage.getItem('neotube_queue');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        // Reset extracting/downloading/merging statuses to paused so they can be resumed/restarted
+        return parsed.map((item: QueueItem) => {
+          if (['extracting', 'downloading', 'merging'].includes(item.status)) {
+            return { ...item, status: 'canceled', isPaused: true, speed: '0 KB/s', eta: '--:--' };
+          }
+          return item;
+        });
+      }
+    } catch(e) {}
+    return [];
+  });
   const [history, setHistory] = useState<HistoryItem[]>(() => {
     try {
       const saved = localStorage.getItem('neotube_history');
@@ -188,18 +231,24 @@ export default function App() {
   useEffect(() => { localStorage.setItem('neotube_darkMode', JSON.stringify(darkMode)); }, [darkMode]);
   useEffect(() => { localStorage.setItem('neotube_autoExport', JSON.stringify(autoExport)); }, [autoExport]);
   useEffect(() => { localStorage.setItem('neotube_history', JSON.stringify(history)); }, [history]);
+  useEffect(() => { localStorage.setItem('neotube_queue', JSON.stringify(queue)); }, [queue]);
+  useEffect(() => { localStorage.setItem('neotube_cookies', youtubeCookies); }, [youtubeCookies]);
 
   const [logs, setLogs] = useState<string[]>([
     '[system] NeoTube Engine initialized v2.4.0',
     '[system] Ready for link input...',
   ]);
+  const [rateLimitCooldown, setRateLimitCooldown] = useState<number>(0);
+
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (rateLimitCooldown > 0) {
+      timer = setTimeout(() => setRateLimitCooldown(prev => Math.max(0, prev - 1)), 1000);
+    }
+    return () => clearTimeout(timer);
+  }, [rateLimitCooldown]);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [isHovering, setIsHovering] = useState(false);
-  
-  const [netscapeCookies, setNetscapeCookies] = useState(() => {
-    return localStorage.getItem('neotube_cookies') || "";
-  });
-  const [isSavingCookies, setIsSavingCookies] = useState(false);
   
   const [clipboardUrl, setClipboardUrl] = useState<string | null>(null);
   const [showClipboardPrompt, setShowClipboardPrompt] = useState(false);
@@ -223,24 +272,33 @@ export default function App() {
       try {
         if (!navigator.clipboard || !document.hasFocus() || showClipboardPrompt) return;
         
-        const text = await navigator.clipboard.readText();
-        const trimmed = text.trim();
-        const urlPattern = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be|twitch\.tv|vimeo\.com)\/.+$/i;
-        
-        if (urlPattern.test(trimmed) && trimmed !== lastCheckedUrl.current && trimmed !== url) {
-          const isDuplicate = queue.some(item => item.url === trimmed) || history.some(item => item.url === trimmed);
-          if (!isDuplicate) {
-            lastCheckedUrl.current = trimmed;
-            if (autoExport) {
-               addUrlsToQueue(trimmed);
-               setClipboardUrl(trimmed);
-               setShowClipboardPrompt(true);
-               setTimeout(() => setShowClipboardPrompt(false), 3000);
-            } else {
-               setClipboardUrl(trimmed);
-               setShowClipboardPrompt(true);
-               setTimeout(() => setShowClipboardPrompt(false), 10000);
+        try {
+          const text = await navigator.clipboard.readText();
+          if (!text) return;
+          const trimmed = text.trim();
+          const videoUrlRegex = /(https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be|facebook\.com|fb\.watch|fb\.com|instagram\.com|tiktok\.com|twitter\.com|x\.com|vimeo\.com|twitch\.tv)[^\s]*)/i;
+          const match = trimmed.match(videoUrlRegex);
+          const foundUrl = match ? match[0] : null;
+          
+          if (foundUrl && foundUrl !== lastCheckedUrl.current && foundUrl !== url) {
+            const isDuplicate = queue.some(item => item.url === foundUrl) || history.some(item => item.url === foundUrl);
+            if (!isDuplicate) {
+              lastCheckedUrl.current = foundUrl;
+              if (autoExport) {
+                 addUrlsToQueue(foundUrl);
+                 setClipboardUrl(foundUrl);
+                 setShowClipboardPrompt(true);
+                 setTimeout(() => setShowClipboardPrompt(false), 3000);
+              } else {
+                 setClipboardUrl(foundUrl);
+                 setShowClipboardPrompt(true);
+                 setTimeout(() => setShowClipboardPrompt(false), 10000);
+              }
             }
+          }
+        } catch (err: any) {
+          if (err.name !== 'NotAllowedError') {
+             console.warn('Clipboard access issue', err);
           }
         }
       } catch (err) {
@@ -277,21 +335,27 @@ export default function App() {
     }
   }, [darkMode]);
 
-  const logEndRef = useRef<HTMLDivElement>(null);
+  const logContainerRef = useRef<HTMLDivElement>(null);
   const abortControllers = useRef<{ [id: string]: AbortController }>({});
 
   useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (logContainerRef.current) {
+      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+    }
   }, [logs]);
 
   // Sequential Queue Processing
   useEffect(() => {
     // Look for items that should start downloading
     const waitingItem = queue.find(item => item.status === 'waiting');
-    if (waitingItem && queue.filter(item => item.status !== 'waiting' && item.status !== 'completed').length < 2) {
+    
+    // Stop processing queue if rate limited
+    if (rateLimitCooldown > 0) return;
+
+    if (waitingItem && queue.filter(item => item.status === 'extracting' || item.status === 'downloading' || item.status === 'merging').length < 2) {
       startDownloadTask(waitingItem);
     }
-  }, [queue]);
+  }, [queue, rateLimitCooldown]);
 
   const formatSpeed = (bytesPerSec: number) => {
     if (bytesPerSec === 0) return '0 KB/s';
@@ -299,6 +363,14 @@ export default function App() {
     const sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
     const i = Math.floor(Math.log(bytesPerSec) / Math.log(k));
     return parseFloat((bytesPerSec / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  };
+
+  const formatSize = (bytes: number | undefined) => {
+    if (!bytes || bytes === 0) return '0 KB';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
   const startDownloadTask = async (task: QueueItem) => {
@@ -312,44 +384,36 @@ export default function App() {
     abortControllers.current[task.id] = controller;
 
     try {
-      const infoRes = await fetch(`/api/info`, {
+      setLogs(prev => [...prev, `[info] Fetching metadata for ${task.url}...`]);
+
+      const savedCookies = localStorage.getItem('neotube_cookies') || '';
+
+      const infoRes = await fetch('/api/info', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ 
-          url: task.url,
-          cookies: netscapeCookies 
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: task.url, cookies: savedCookies }),
         signal: controller.signal
       });
+
       if (!infoRes.ok) {
         const errObj = await infoRes.json().catch(() => ({}));
-        throw new Error(errObj.error || `Could not fetch info: Status ${infoRes.status}`);
+        throw new Error(errObj.error || "Failed to fetch metadata from server");
       }
+
       const info = await infoRes.json();
-      
-      const realTitle = info.title || task.title;
+      const realTitle = info.title || task.title !== "Extracting..." ? task.title : 'Downloaded_Media';
 
       setQueue(prevQueue => prevQueue.map(item => 
         item.id === task.id ? { ...item, title: realTitle, status: 'downloading' } : item
       ));
 
-      setLogs(prev => [...prev, `[info] Starting download: ${realTitle}`]);
+      setLogs(prev => [...prev, `[info] Starting streaming download: ${realTitle}`]);
 
-      // Download via fetch to track progress
-      const downloadUrl = `/api/stream`;
-      const response = await fetch(downloadUrl, {
+      // Download via proxy stream to track progress
+      const response = await fetch('/api/stream', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          url: task.url,
-          mode: task.mode,
-          quality: task.quality,
-          cookies: netscapeCookies
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: task.url, mode: task.mode, quality: task.quality, cookies: savedCookies }),
         signal: controller.signal
       });
       
@@ -397,7 +461,7 @@ export default function App() {
                   totalSize: total,
                   status: 'downloading',
                   speed: speedStr,
-                  eta: total ? `00:${Math.max(0, Math.floor((total - loaded) / speedBytes)).toString().padStart(2, '0')}` : '--:--'
+                  eta: total ? `00:${Math.max(0, Math.floor((total - loaded) / Math.max(speedBytes, 1))).toString().padStart(2, '0')}` : '--:--'
                 };
               }
               return item;
@@ -431,7 +495,8 @@ export default function App() {
         size: total ? `${(total / (1024 * 1024)).toFixed(1)} MB` : `${(loaded / (1024 * 1024)).toFixed(1)} MB`,
         mode: task.mode,
         quality: task.quality,
-        url: task.url
+        url: task.url,
+        thumbnail: task.thumbnail
       };
       
       setHistory(h => [newItem, ...h]);
@@ -445,12 +510,23 @@ export default function App() {
       if (error.name === 'AbortError') {
         setLogs(l => [...l, `[info] Download cancelled for ${task.url}`]);
       } else {
-        console.error(error);
-        setLogs(l => [...l, `[error] Download failed for ${task.url}: ${error.message || String(error)}`]);
+        const isRateLimit = error.message === 'COBALT_RATE_LIMIT' || error.message.includes('CORS') || error.message.includes('Failed to fetch') || error.message.includes('Too Many Requests');
+        
+        if (isRateLimit) {
+           setRateLimitCooldown(60);
+           setLogs(l => [...l, `[warning] ${task.url}: Cobalt API Rate Limit reached or CORS blocked due to excessive requests. Waiting 60s cooldown...`]);
+           // Put back into waiting
+           setQueue(prevQueue => prevQueue.map(item => 
+             item.id === task.id ? { ...item, status: 'waiting', speed: '0 KB/s', eta: '--:--', progress: 0 } : item
+           ));
+        } else {
+           console.error(error);
+           setLogs(l => [...l, `[error] Download failed for ${task.url}: ${error.message || String(error)}`]);
+           setQueue(prevQueue => prevQueue.map(item => 
+             item.id === task.id && item.status !== 'completed' ? { ...item, status: 'error', speed: '0 KB/s', eta: '--:--', progress: 0 } : item
+           ));
+        }
       }
-      setQueue(prevQueue => prevQueue.map(item => 
-        item.id === task.id && item.status !== 'completed' ? { ...item, status: 'canceled', speed: '0 KB/s', eta: '--:--', progress: 0 } : item
-      ));
     } finally {
       delete abortControllers.current[task.id];
     }
@@ -473,7 +549,8 @@ export default function App() {
       totalSize: 0,
       speed: '0 KB/s',
       eta: '--:--',
-      isPaused: false
+      isPaused: false,
+      thumbnail: getThumbnailForUrl(targetUrl)
     }));
 
     setQueue(prev => [...prev, ...newItems]);
@@ -501,7 +578,7 @@ export default function App() {
       const res = await fetch('/api/playlist-info', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, cookies: netscapeCookies })
+        body: JSON.stringify({ url, cookies: youtubeCookies })
       });
       if (!res.ok) throw new Error("Failed to fetch playlist");
       const data = await res.json();
@@ -527,23 +604,24 @@ export default function App() {
     setUrl('');
   };
 
-  const handleSaveCookies = async () => {
-    setIsSavingCookies(true);
-    try {
-      localStorage.setItem('neotube_cookies', netscapeCookies);
-      setLogs(prev => [...prev, '[system] Cookies saved successfully to your browser!']);
-    } catch (e) {
-      setLogs(prev => [...prev, '[error] Cookie save failed: ' + String(e)]);
-    } finally {
-      setIsSavingCookies(false);
-    }
-  };
-
   const togglePause = (id: string) => {
-    setQueue(prev => prev.map(item => 
-      item.id === id ? { ...item, isPaused: !item.isPaused } : item
-    ));
-    setLogs(prev => [...prev, `[system] Task updated: status toggled`]);
+    setQueue(prev => {
+      const item = prev.find(i => i.id === id);
+      if (!item) return prev;
+      
+      const newPaused = !item.isPaused;
+      
+      if (newPaused) {
+        if (abortControllers.current[id]) {
+          abortControllers.current[id].abort();
+          delete abortControllers.current[id];
+        }
+        return prev.map(i => i.id === id ? { ...i, isPaused: true, status: 'canceled', speed: '0 KB/s', eta: '--:--' } : i);
+      } else {
+        return prev.map(i => i.id === id ? { ...i, isPaused: false, status: 'waiting', progress: 0 } : i);
+      }
+    });
+    setLogs(prev => [...prev, `[system] Task ${id} pause manually toggled`]);
   };
 
   const removeFromQueue = (id: string) => {
@@ -643,7 +721,7 @@ export default function App() {
               <Play className="text-white fill-white ml-0.5" size={20} />
             </div>
             <div>
-              <h1 className="text-2xl font-bold tracking-tight text-slate-800 dark:text-white">NeoTube</h1>
+              <h1 className="text-2xl font-bold tracking-tight text-red-500 dark:text-red-500">NeoTube</h1>
               <p className="text-xs font-medium text-slate-500 dark:text-slate-400 -mt-1 uppercase tracking-widest">Downloader</p>
             </div>
           </div>
@@ -665,6 +743,15 @@ export default function App() {
                 </Magnetic>
                 <Magnetic strength={0.2}>
                   <button 
+                    onClick={() => setShowFeedbackModal(true)}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all text-sm font-medium text-slate-500 hover:bg-white dark:hover:bg-slate-800 hover:shadow-sm"
+                  >
+                    <Bug size={16} />
+                    <span className="hidden sm:inline">Feedback</span>
+                  </button>
+                </Magnetic>
+                <Magnetic strength={0.2}>
+                  <button 
                     onClick={() => setShowSettings(!showSettings)}
                     className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all text-sm font-medium ${
                       showSettings ? 'bg-brand text-white shadow-brand/20' : 'text-slate-500 hover:bg-white dark:hover:bg-slate-800 hover:shadow-sm'
@@ -676,6 +763,34 @@ export default function App() {
                 </Magnetic>
               </div>
         </motion.header>
+
+        {/* Rate Limit Alert */}
+        <AnimatePresence>
+          {rateLimitCooldown > 0 && (
+            <motion.div 
+              initial={{ opacity: 0, y: -10, height: 0 }}
+              animate={{ opacity: 1, y: 0, height: 'auto' }}
+              exit={{ opacity: 0, y: -10, height: 0 }}
+              className="w-full flex"
+            >
+              <div className="w-full bg-orange-500/10 border border-orange-500/20 text-orange-600 dark:text-orange-400 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between shadow-inner backdrop-blur-md mb-2">
+                <div className="flex items-center gap-4">
+                  <div className="w-10 h-10 rounded-full bg-orange-500/20 flex items-center justify-center shrink-0">
+                    <AlertCircle size={20} className="animate-pulse" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-sm tracking-wide">Cobalt API Rate Limit Active</h4>
+                    <p className="text-xs font-medium opacity-80 mt-0.5">To protect the free public API, requests are temporarily paused. Downloads will automatically resume.</p>
+                  </div>
+                </div>
+                <div className="flex flex-col items-center justify-center shrink-0 bg-white/50 dark:bg-black/20 rounded-xl px-6 py-2 mt-4 sm:mt-0 shadow-sm border border-orange-500/10">
+                  <span className="text-2xl font-black">{rateLimitCooldown}s</span>
+                  <span className="text-[9px] uppercase font-bold tracking-widest opacity-70">Cooldown</span>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* URL Input Area - Hero Entrance */}
         <motion.section 
@@ -690,35 +805,68 @@ export default function App() {
             </div>
             <div className="relative group">
               <textarea 
-                placeholder="Paste links (one per line or separated by spaces)..."
-                className="w-full bg-white/50 dark:bg-black/40 border border-slate-200/60 dark:border-white/5 rounded-2xl px-6 py-5 outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand/40 transition-all text-slate-700 dark:text-slate-200 placeholder:text-slate-400 text-sm min-h-[100px] resize-none"
+                placeholder="Paste links and press Enter (Shift+Enter for multiple)..."
+                className="w-full bg-white/50 dark:bg-black/40 border border-slate-200/60 dark:border-white/5 rounded-2xl p-6 outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand/40 transition-all text-slate-700 dark:text-slate-200 placeholder:text-slate-400 text-sm min-h-[120px] resize-none"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    if (url.trim()) {
+                      handleAddToQueue();
+                    }
+                  }
+                }}
               />
-              <div className="absolute top-4 right-4 flex gap-2">
-                {url && (
-                  <button 
-                    onClick={() => setUrl('')}
-                    className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
-                  >
-                    <Eraser size={18} />
-                  </button>
-                )}
-                {url && (
-                  <Magnetic strength={0.4}>
-                    <button 
-                      onClick={handleAddToQueue}
-                      className="p-3 bg-brand text-white rounded-xl shadow-lg shadow-brand/20 hover:scale-110 active:scale-95 transition-all"
-                      title="Add to Queue"
-                    >
-                      <Play size={20} fill="white" className="ml-0.5" />
-                    </button>
-                  </Magnetic>
-                )}
-              </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mt-2">
+            <div className="flex flex-col sm:flex-row gap-3 mt-1">
+              <button
+                onClick={async () => {
+                  if (url) {
+                    setUrl('');
+                  } else {
+                    try {
+                      const text = await navigator.clipboard.readText();
+                      if (text) {
+                        const videoUrlRegex = /(https?:\/\/(?:www\.youtube\.com|youtu\.be|facebook\.com|fb\.watch|fb\.com|instagram\.com|tiktok\.com|twitter\.com|x\.com|vimeo\.com|twitch\.tv)[^\s]*)/gi;
+                        const matches = text.match(videoUrlRegex);
+                        if (matches && matches.length > 0) {
+                          setUrl(matches.join('\n'));
+                        } else {
+                          setLogs(prev => [...prev, '[warning] No supported video URLs found in clipboard.']);
+                        }
+                      }
+                    } catch (err: any) {
+                      console.error('Failed to read clipboard', err);
+                      setLogs(prev => [...prev, '[error] Clipboard blocked by browser. Please long-press the text box above and select "Paste".']);
+                    }
+                  }
+                }}
+                className="flex-1 flex items-center justify-center gap-2 py-3 bg-red-500/10 dark:bg-red-500/10 hover:bg-red-500/20 dark:hover:bg-red-500/20 text-red-500 dark:text-red-500 rounded-xl text-sm font-bold uppercase tracking-widest transition-all"
+              >
+                {url ? (
+                  <>
+                    <Eraser size={16} /> Clear Text
+                  </>
+                ) : (
+                  <>
+                    <Clipboard size={16} /> Paste from Clipboard
+                  </>
+                )}
+              </button>
+              
+              <button 
+                onClick={handleAddToQueue}
+                disabled={!url}
+                className="flex-[2] flex flex-row items-center justify-center gap-2 py-3 bg-brand text-white rounded-xl shadow-lg shadow-brand/20 hover:scale-[1.02] active:scale-95 disabled:opacity-50 disabled:hover:scale-100 transition-all text-sm font-bold uppercase tracking-widest"
+              >
+                <Download size={18} />
+                Download
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mt-4">
               {/* Mode Switcher */}
               <div className="flex flex-col gap-3">
                 <span className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 tracking-widest px-1">Download Mode</span>
@@ -743,54 +891,46 @@ export default function App() {
               {/* Quality Selector */}
               <div className="flex flex-col gap-3">
                 <span className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 tracking-widest px-1">Quality Preferred</span>
-                <div className="grid grid-cols-5 gap-1.5 p-1 bg-slate-100/50 dark:bg-black/40 rounded-2xl border border-slate-200/50 dark:border-white/5">
-                  {(['best', '1080p', '720p', '480p', '360p'] as Quality[]).map((q) => (
-                    <button 
-                      key={q}
-                      onClick={() => setQuality(q)}
-                      className={`text-[10px] font-bold py-3 rounded-xl transition-all ${quality === q ? 'bg-white dark:bg-slate-800 text-brand shadow-sm' : 'text-slate-500 hover:bg-white/50 dark:hover:bg-black/50'}`}
-                    >
-                       {q === 'best' ? 'Best' : q.toUpperCase()}
-                    </button>
-                  ))}
+                <div className={`grid gap-1.5 p-1 bg-slate-100/50 dark:bg-black/40 rounded-2xl border border-slate-200/50 dark:border-white/5 ${mode === 'video' ? 'grid-cols-6' : 'grid-cols-5'}`}>
+                  {mode === 'video' ? (
+                     (['4k', '2k', '1080p', '720p', '480p', '360p'] as Quality[]).map((q) => (
+                      <button 
+                        key={q}
+                        onClick={() => setQuality(q)}
+                        className={`text-[10px] font-bold py-3 rounded-xl transition-all ${quality === q ? 'bg-white dark:bg-slate-800 text-brand shadow-sm' : 'text-slate-500 hover:bg-white/50 dark:hover:bg-black/50'}`}
+                      >
+                         {q.toUpperCase()}
+                      </button>
+                    ))
+                  ) : (
+                     (['best', '320kbps', '256kbps', '128kbps', '64kbps'] as AudioQuality[]).map((q) => (
+                      <button 
+                        key={q}
+                        onClick={() => setAudioQuality(q)}
+                        className={`text-[10px] font-bold py-3 rounded-xl transition-all ${audioQuality === q ? 'bg-white dark:bg-slate-800 text-brand shadow-sm' : 'text-slate-500 hover:bg-white/50 dark:hover:bg-black/50'}`}
+                      >
+                         {q === 'best' ? 'BEST' : q.toUpperCase()}
+                      </button>
+                    ))
+                  )}
                 </div>
               </div>
             </div>
           </GlowCard>
         </motion.section>
 
-        {/* Folder & Settings Container - Hero Entrance */}
-        <motion.section 
-          {...heroSection}
-          transition={{ ...heroSection.transition, delay: 0.3 }}
-          className="w-full"
-        >
-          <GlowCard className="glass rounded-3xl p-6 flex flex-col gap-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div className="flex-1 flex flex-col gap-2">
-                <div className="flex items-center gap-2 text-slate-500 font-semibold text-xs uppercase tracking-wider px-1">
-                  <FolderOpen size={14} />
-                  <span>Save Location</span>
-                </div>
-                <div className="flex items-center gap-2 bg-slate-100/50 dark:bg-black/40 border border-dashed border-slate-300 dark:border-white/5 px-4 py-2.5 rounded-xl group hover:border-brand/40 transition-colors">
-                  <span className="text-sm font-mono text-slate-500 truncate flex-1">{savePath}</span>
-                  <button className="text-brand hover:bg-brand/10 p-1.5 rounded-lg transition-colors">
-                    <FolderOpen size={16} />
-                  </button>
-                </div>
-              </div>
-              
-            </div>
-
-            <AnimatePresence>
-              {showSettings && (
-                <motion.div 
-                  initial={{ height: 0, opacity: 0 }}
-                  animate={{ height: 'auto', opacity: 1 }}
-                  exit={{ height: 0, opacity: 0 }}
-                  className="overflow-hidden"
-                >
-                  <div className="pt-4 border-t border-slate-200/60 dark:border-slate-800/60 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+        {/* Settings Container - Hero Entrance */}
+        <AnimatePresence>
+          {showSettings && (
+            <motion.section 
+              {...heroSection}
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1, transition: { ...heroSection.transition } }}
+              exit={{ height: 0, opacity: 0 }}
+              className="w-full overflow-hidden"
+            >
+              <GlowCard className="glass rounded-3xl p-6 flex flex-col gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
                     {/* Dark Mode Toggle */}
                     <div className="flex flex-col gap-4">
                       <div className="flex items-center gap-2 text-slate-600 dark:text-slate-400 font-bold text-xs uppercase tracking-widest">
@@ -835,46 +975,6 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Browser Integration */}
-                    <div className="flex flex-col gap-4">
-                      <div className="flex items-center gap-2 text-slate-600 dark:text-slate-400 font-bold text-xs uppercase tracking-widest">
-                        <Cookie size={14} />
-                        Export Cookies (Auto-extract)
-                      </div>
-                      <div className="flex gap-2">
-                        <button className="flex-1 text-[10px] font-bold py-3 px-4 border border-slate-200 dark:border-slate-800 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors flex items-center justify-center gap-2 dark:text-slate-300">
-                          <img src="https://www.google.com/s2/favicons?domain=google.com&sz=16" alt="Chrome" className="w-4 h-4 grayscale group-hover:grayscale-0" />
-                          Export Chrome
-                        </button>
-                        <button className="flex-1 text-[10px] font-bold py-3 px-4 border border-slate-200 dark:border-slate-800 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors flex items-center justify-center gap-2 dark:text-slate-300">
-                          <img src="https://www.google.com/s2/favicons?domain=brave.com&sz=16" alt="Brave" className="w-4 h-4" />
-                          Export Brave
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Netscape HTTP Cookies */}
-                    <div className="flex flex-col gap-4">
-                      <div className="flex items-center gap-2 text-slate-600 dark:text-slate-400 font-bold text-xs uppercase tracking-widest">
-                        <Cookie size={14} />
-                        Netscape Cookies
-                      </div>
-                      <textarea
-                        value={netscapeCookies}
-                        onChange={(e) => setNetscapeCookies(e.target.value)}
-                        placeholder="# Netscape HTTP Cookie File\n# Paste contents here..."
-                        className="bg-slate-50 dark:bg-zinc-900 border border-slate-200 dark:border-white/5 rounded-xl px-4 py-3 text-xs font-mono outline-none focus:border-brand/40 dark:text-slate-300 w-full shadow-inner min-h-[120px] resize-y"
-                      />
-                      <button 
-                        onClick={handleSaveCookies}
-                        disabled={isSavingCookies}
-                        className="w-full bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700/50 rounded-xl p-3 text-[10px] font-bold text-slate-600 dark:text-slate-300 flex items-center justify-center gap-2 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors disabled:opacity-50"
-                      >
-                        <Upload size={14} />
-                        {isSavingCookies ? "Saving..." : "Save Cookies"}
-                      </button>
-                    </div>
-
                     {/* Additional Flags */}
                     <div className="flex flex-col gap-4">
                       <div className="flex items-center gap-2 text-slate-600 dark:text-slate-400 font-bold text-xs uppercase tracking-widest">
@@ -888,11 +988,39 @@ export default function App() {
                       />
                     </div>
                   </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </GlowCard>
-        </motion.section>
+                  
+                  <div className="pt-6 grid grid-cols-1">
+                    {/* YouTube Cookies */}
+                    <div className="flex flex-col gap-4">
+                      <div className="flex items-center justify-between text-slate-600 dark:text-slate-400 font-bold text-xs uppercase tracking-widest">
+                        <div className="flex items-center gap-2">
+                          <Settings size={14} />
+                          YouTube Netscape Cookies (Required to bypass age/bot restriction)
+                        </div>
+                      </div>
+                      <textarea 
+                        value={youtubeCookies}
+                        onChange={(e) => setYoutubeCookies(e.target.value)}
+                        placeholder="Paste your Netscape format YouTube cookies here..."
+                        className="bg-slate-50 dark:bg-zinc-900 border border-slate-200 dark:border-white/5 rounded-xl px-4 py-3 text-xs font-mono outline-none focus:border-brand/40 dark:text-slate-300 w-full shadow-inner min-h-[100px] resize-y"
+                      />
+                      <div className="flex justify-end">
+                        <button
+                          onClick={() => {
+                            localStorage.setItem('neotube_cookies', youtubeCookies);
+                            setLogs(prev => [...prev, '[info] YouTube cookies saved successfully.']);
+                          }}
+                          className="bg-brand text-white px-4 py-2 rounded-lg text-xs font-bold transition-all shadow-md shadow-brand/20 hover:scale-105 active:scale-95"
+                        >
+                          Submit Cookies
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </GlowCard>
+              </motion.section>
+            )}
+          </AnimatePresence>
 
         {/* Download Manager - The Unified Hub */}
         <motion.section 
@@ -943,9 +1071,9 @@ export default function App() {
                      )}
 
                      <div className="relative z-10 flex flex-col gap-4">
-                       <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-3">
-                             <div className={`w-10 h-10 rounded-xl flex items-center justify-center shadow-lg transition-colors ${
+                       <div className="flex items-center justify-between gap-2 overflow-hidden">
+                          <div className="flex items-center gap-3 min-w-0">
+                             <div className={`shrink-0 w-12 h-12 rounded-xl flex items-center justify-center shadow-lg transition-colors relative overflow-hidden ${
                                item.status === 'completed'
                                  ? 'bg-emerald-500 text-white'
                                  : item.isPaused 
@@ -954,39 +1082,53 @@ export default function App() {
                                  ? 'bg-slate-200 dark:bg-slate-800 text-slate-500 dark:text-slate-400'
                                  : 'bg-brand text-white shadow-brand/20'
                              }`}>
-                                {item.status === 'completed' ? (
-                                  <Check size={20} />
-                                ) : item.isPaused ? (
-                                  <Pause size={20} />
-                                ) : item.status === 'waiting' ? (
-                                  <span className="text-xs font-bold">{idx + 1}</span>
-                                ) : (
-                                  <div className="w-5 h-5 rounded-full border-2 border-white/20 border-t-white animate-spin" />
+                                {item.thumbnail && (
+                                  <img 
+                                    src={item.thumbnail} 
+                                    alt="thumbnail" 
+                                    className="absolute inset-0 w-full h-full object-cover opacity-40 mix-blend-overlay"
+                                  />
                                 )}
+                                <div className="relative z-10 flex items-center justify-center">
+                                  {item.status === 'completed' ? (
+                                    <Check size={20} />
+                                  ) : item.isPaused ? (
+                                    <Pause size={20} />
+                                  ) : item.status === 'waiting' ? (
+                                    <span className="text-xs font-bold">{idx + 1}</span>
+                                  ) : (
+                                    <div className="w-5 h-5 rounded-full border-2 border-white/20 border-t-white animate-spin" />
+                                  )}
+                                </div>
                              </div>
                              <div className="min-w-0">
-                               <h4 className="text-sm font-bold text-slate-800 dark:text-white truncate max-w-[200px] md:max-w-[400px]">
+                               <h4 className="text-sm font-bold text-slate-800 dark:text-white truncate">
                                  {item.title}
                                </h4>
-                               <div className="flex items-center gap-3 mt-1">
+                               <div className="flex items-center flex-wrap gap-2 mt-1">
                                  {item.status !== 'waiting' && item.status !== 'completed' && (
                                    <>
-                                     <span className="text-[10px] font-black text-brand uppercase tracking-tighter">{item.speed}</span>
-                                     <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">ETA {item.eta}</span>
+                                     <span className="text-[10px] font-black text-brand uppercase tracking-tighter shrink-0">{item.speed}</span>
+                                     {(item.totalSize || item.loadedSize) && (
+                                       <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest shrink-0">
+                                         {formatSize(item.loadedSize)} {item.totalSize ? `/ ${formatSize(item.totalSize)}` : ''}
+                                       </span>
+                                     )}
+                                     <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest shrink-0">ETA {item.eta}</span>
                                    </>
                                  )}
                                  {item.status === 'waiting' && (
-                                   <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Waiting in queue • {item.quality}</span>
+                                   <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest truncate">Waiting • {item.quality}</span>
                                  )}
                                  {item.status === 'completed' && (
-                                   <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest flex items-center gap-1">
-                                     <CheckCircle2 size={10} /> Finished
+                                   <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest flex items-center gap-1 shrink-0">
+                                     <CheckCircle2 size={10} /> Finished {(item.totalSize || item.loadedSize) && `• ${formatSize(item.totalSize || item.loadedSize)}`}
                                    </span>
                                  )}
                                </div>
                              </div>
                           </div>
-                          <div className="flex gap-2">
+                          <div className="flex gap-2 shrink-0">
                              {item.status !== 'waiting' && item.status !== 'completed' && (
                                <Magnetic strength={0.2}>
                                  <button 
@@ -1002,7 +1144,7 @@ export default function App() {
                                  onClick={() => {
                                    removeFromQueue(item.id);
                                  }}
-                                 className="p-2.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/5 text-slate-600 dark:text-slate-300 hover:text-rose-500 transition-colors"
+                                 className="p-2.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/5 text-red-500 hover:text-red-600 dark:text-red-500 dark:hover:text-red-400 transition-colors"
                                >
                                  <X size={16} />
                                </button>
@@ -1099,7 +1241,7 @@ export default function App() {
               </div>
               <button 
                 onClick={() => setLogs([])}
-                className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
+                className="text-red-500 hover:text-red-600 dark:text-red-500 dark:hover:text-red-400 transition-colors"
                 title="Clear Logs"
               >
                 <Eraser size={14} />
@@ -1107,7 +1249,7 @@ export default function App() {
             </div>
           </div>
 
-          <div className="bg-slate-900 dark:bg-black rounded-2xl p-4 font-mono text-xs leading-relaxed overflow-y-auto max-h-[180px] scroll-hide border border-slate-800 shadow-inner">
+          <div ref={logContainerRef} className="bg-slate-900 dark:bg-black rounded-2xl p-4 font-mono text-xs leading-relaxed overflow-y-auto max-h-[180px] scroll-hide border border-slate-800 shadow-inner">
             {logs.length === 0 && <span className="text-slate-600 italic">Waiting for process start...</span>}
             {logs.map((log, i) => (
               <div key={i} className="flex gap-3 mb-1">
@@ -1121,7 +1263,6 @@ export default function App() {
                 </span>
               </div>
             ))}
-            <div ref={logEndRef} />
           </div>
         </motion.section>
 
@@ -1294,8 +1435,21 @@ export default function App() {
                         className="group relative p-4 rounded-2xl border border-slate-100 dark:border-slate-900 bg-slate-50/50 dark:bg-slate-900/50 hover:bg-white dark:hover:bg-slate-900 hover:border-brand/20 transition-all"
                       >
                         <div className="flex flex-col gap-3">
-                          <div className="flex items-start justify-between">
-                            <div className="flex-1 min-w-0">
+                          <div className="flex items-start justify-between gap-3">
+                            {item.thumbnail ? (
+                              <div className="shrink-0 w-16 h-12 rounded-lg overflow-hidden relative shadow-sm border border-slate-200/50 dark:border-white/5">
+                                <img src={item.thumbnail} alt="thumbnail" className="w-full h-full object-cover" />
+                                <div className="absolute inset-0 bg-emerald-500/20 mix-blend-overlay" />
+                                <div className="absolute bottom-1 right-1 bg-black/60 rounded-full p-0.5">
+                                   <CheckCircle2 size={10} className="text-emerald-400" />
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="shrink-0 w-12 h-12 rounded-lg flex items-center justify-center bg-emerald-500/10 text-emerald-500">
+                                <CheckCircle2 size={20} />
+                              </div>
+                            )}
+                            <div className="flex-1 min-w-0 pt-0.5">
                               <h3 className="text-sm font-bold text-slate-800 dark:text-slate-100 truncate" title={item.title}>
                                 {item.title}
                               </h3>
@@ -1346,6 +1500,100 @@ export default function App() {
                 </div>
               </motion.div>
             </>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {showFeedbackModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="w-full max-w-md bg-zinc-900 border border-white/10 rounded-2xl p-6 shadow-2xl relative shadow-black/50"
+              >
+                <div className="flex justify-between items-center mb-6">
+                  <h3 className="text-white font-bold tracking-wide">Share Your Feedback</h3>
+                  <button 
+                    onClick={() => setShowFeedbackModal(false)}
+                    className="text-red-500 hover:text-red-400 transition-colors"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+
+                <div className="flex flex-col gap-5">
+                  <div className="flex flex-col gap-2">
+                    <label className="text-xs font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2">
+                       <User size={14} /> Who are you?
+                    </label>
+                    <div className="flex flex-wrap gap-2">
+                      {['YouTuber', 'Editor', 'Designer', 'Developer', 'Hobbyist'].map((role) => (
+                        <button
+                          key={role}
+                          onClick={() => setFeedbackRole(role)}
+                          className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                            feedbackRole === role 
+                              ? 'bg-brand text-white shadow-sm shadow-brand/20' 
+                              : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                          }`}
+                        >
+                          {role}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <label className="text-xs font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2">
+                       <Tag size={14} /> What's this about?
+                    </label>
+                    <select 
+                      value={feedbackType}
+                      onChange={(e) => setFeedbackType(e.target.value)}
+                      className="bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-slate-200 outline-none focus:border-brand/50 w-full appearance-none"
+                    >
+                      <option className="bg-zinc-800 text-white" value="Feature Request">Feature Request</option>
+                      <option className="bg-zinc-800 text-white" value="Bug Report">Bug Report</option>
+                      <option className="bg-zinc-800 text-white" value="General Feedback">General Feedback</option>
+                    </select>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <label className="text-xs font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2">
+                       <ClipboardList size={14} /> Your feedback
+                    </label>
+                    <textarea 
+                      value={feedbackText}
+                      onChange={(e) => setFeedbackText(e.target.value)}
+                      placeholder="Tell us what you think..."
+                      className="bg-zinc-950 border border-brand rounded-xl px-4 py-3 text-sm text-slate-200 outline-none focus:ring-1 focus:ring-brand w-full min-h-[120px] resize-y placeholder:text-slate-600"
+                    />
+                  </div>
+
+                  <div className="flex justify-end gap-3 mt-2">
+                    <button 
+                      onClick={() => setShowFeedbackModal(false)}
+                      className="px-5 py-2.5 rounded-lg text-sm font-bold text-red-500 bg-red-500/10 hover:bg-red-500/20 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      onClick={() => {
+                        const subject = encodeURIComponent(`NeoTube ${feedbackType} from ${feedbackRole}`);
+                        const body = encodeURIComponent(feedbackText);
+                        window.open(`mailto:muhammadonimisisuleiman@gmail.com?subject=${subject}&body=${body}`, '_blank');
+                        setShowFeedbackModal(false);
+                      }}
+                      disabled={!feedbackText.trim()}
+                      className="px-5 py-2.5 rounded-lg text-sm font-bold text-white bg-brand shadow-sm shadow-brand/20 hover:scale-[1.02] active:scale-95 disabled:opacity-50 disabled:scale-100 transition-all"
+                    >
+                      Submit Feedback
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
           )}
         </AnimatePresence>
 
